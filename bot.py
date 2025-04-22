@@ -1,61 +1,39 @@
-# monitor_bot.py
-import os
-import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os import requests from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# 2) Konfigurasi lewat environment variables
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")    # token dari BotFather
-CHAT_ID         = os.getenv("CHAT_ID")          # chat_id target (bisa grup atau personal)
-NODE_ID         = os.getenv(
-    "NODE_ID",
-    "0xdb9f33703aa0d90dfc56c96b2263bacf383db1c7"
-)
-METRICS = ["Precommit", "Commit", "Create", "Prepare"]
-BASE_URL = "https://dashboard-devnet4.cortensor.network/stats/node/{node_id}?metric={metric}"
+Ambil token dan chat ID dari environment or defaults
 
-def fetch_latest_metric(node_id: str, metric: str):
-    """
-    GET <BASE_URL>?metric=<metric>, 
-    parse JSON, return nilai terakhir (assume data['data'] is list of points).
-    """
-    url = BASE_URL.format(node_id=node_id, metric=metric)
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    js = resp.json()
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8101652890:AAGkQGAopqTKlOOoU4fH7mTtDde3OgBuYtI") CHAT_ID = os.getenv("CHAT_ID", "611044696") METRICS = ["Precommit", "Commit", "Create", "Prepare"] BASE_URL = "https://dashboard-devnet4.cortensor.network/stats/node/{node_id}?metric={metric}"
 
-    # contoh struktur: {"data": [{"timestamp":..., "value": ...}, ...]}
-    arr = js.get("data", [])
-    if not arr:
-        return None
-    last = arr[-1]
-    # bisa perlu disesuaikan jika struktur berbeda
-    return last.get("value") or last
+def fetch_latest_metric(node_id: str, metric: str): """ GET <BASE_URL>?metric=<metric>, parse JSON, return nilai terakhir. """ url = BASE_URL.format(node_id=node_id.strip(), metric=metric) resp = requests.get(url, timeout=10) resp.raise_for_status() js = resp.json()
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 Bot monitoring node siap berjalan! Anda akan menerima metric setiap 5 menit.")
+arr = js.get("data", [])
+if not arr:
+    return None
+last = arr[-1]
+return last.get("value", last)
 
-async def job_monitor(context: ContextTypes.DEFAULT_TYPE):
-    lines = [f"📊 Metrics untuk node `{NODE_ID}`:"]
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text( "👋 Selamat datang! Gunakan perintah /metrics <node_id> untuk mengambil metric node. Contoh: /metrics 0x1234... , parse_mode="Markdown" )
+
+async def cmd_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE): args = context.args if not args: await update.message.reply_text( "⚠️ Harap sertakan Node ID. Contoh: /metrics 0x1234...", parse_mode="Markdown" ) return
+
+for node in args:
+    lines = [f"📊 Metrics untuk node `{node.strip()}`:"]
     for m in METRICS:
         try:
-            val = fetch_latest_metric(NODE_ID, m)
+            val = fetch_latest_metric(node, m)
         except Exception as e:
             val = f"Error: {e}"
         lines.append(f"• {m}: {val}")
     text = "\n".join(lines)
-    await context.bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="Markdown")
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=text,
+        parse_mode="Markdown"
+    )
 
-def main():
-    # 3) Bangun aplikasi dan daftarkan handler
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
+async def main(): app = ApplicationBuilder().token(TELEGRAM_TOKEN).build() app.add_handler(CommandHandler("start", cmd_start)) app.add_handler(CommandHandler("metrics", cmd_metrics))
 
-    # 4) Schedule polling tiap 300 detik (5 menit), mulai 10 detik setelah run
-    jq = app.job_queue
-    jq.run_repeating(job_monitor, interval=300, first=10)
+app.run_polling()
 
-    app.run_polling()
+if name == "main": import asyncio asyncio.run(main())
 
-if __name__ == "__main__":
-    main()
