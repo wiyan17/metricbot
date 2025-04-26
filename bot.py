@@ -1,43 +1,35 @@
-import os import requests import logging from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os import re import requests import logging from telegram import Update from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-====== Konfigurasi BOT ======
+================= CONFIGURATION =================
 
-TELEGRAM_TOKEN = os.getenv( "TELEGRAM_TOKEN", "8101652890:AAGkQGAopqTKlOOoU4fH7mTtDde3OgBuYtI" )
+TELEGRAM_TOKEN = os.getenv( "TELEGRAM_TOKEN", "8101652890:AAGkQGAopqTKlOOoU4fH7mTtDde3OgBuYtI" ) logging.basicConfig( format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO ) API_BASE_URL = "https://lb-be-4.cortensor.network/reputation" METRICS = ["create", "commit", "prepare", "precommit"]
 
-Enable logging
+def escape_markdown_v2(text): """ Escape special characters for Telegram MarkdownV2. """ if not isinstance(text, str): text = str(text) escape_chars = r'_*~`>#+-=|{}.!' return re.sub(f'([{re.escape(escape_chars)}])', r'\\1', text)
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+def fetch_metric(node_id, metric): """ Fetch a single metric from the API and return parsed JSON. """ url = f"{API_BASE_URL}/{node_id}/{metric}" resp = requests.get(url, timeout=10) resp.raise_for_status() return resp.json()
 
-API Base URL untuk mengambil metric
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE): """ Send welcome message in English with usage instructions. """ welcome_message = ( "👋 Welcome! Use the /metrics <node_id> command to fetch node metrics.\n" "Example: /metrics 0xb618b27B55372AE8d304E4A10fa82E506c771c1A" ) await update.message.reply_text( welcome_message, parse_mode="MarkdownV2" )
 
-API_BASE_URL = "https://lb-be-4.cortensor.network/reputation"
-
-Daftar metric yang tersedia
-
-METRICS = ["create", "commit", "prepare", "precommit"]
-
-def escape_markdown_v2(text: str) -> str: """ Escape text so it can be safely used with MarkdownV2 formatting. """ if not isinstance(text, str): text = str(text) # karakter yang perlu di-escape di MarkdownV2 escape_chars = r'_*~`>#+-=|{}.!' return re.sub(f'([{escape_chars}])', r'\\1', text)
-
-def fetch_metric(node_id: str, metric: str): """ Fetch a single metric for a node. Returns parsed JSON or raises error. """ url = f"{API_BASE_URL}/{node_id.strip()}/{metric}" resp = requests.get(url, timeout=10) resp.raise_for_status() # Bisa saja JSON langsung jumlah, atau object return resp.json()
-
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE): """ Sambutan dan instruksi penggunaan bot. """ text = ( "👋 Selamat datang!\n" "Gunakan perintah /metrics <node_id> untuk mengambil metric node.\n" "Contoh: /metrics 0xb618b27B55372AE8d304E4A10fa82E506c771c1A ) await update.message.reply_text(text, parse_mode="MarkdownV2")
-
-async def cmd_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE): """ Handler untuk perintah /metrics <node_id> """ args = context.args if len(args) != 1: await update.message.reply_text( "⚠️ Gunakan: /metrics <node_id>", parse_mode="MarkdownV2" ) return
+async def cmd_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE): """ Handle /metrics <node_id>: fetch and display all metrics. """ args = context.args if len(args) != 1: await update.message.reply_text( "⚠️ Usage: /metrics <node_id>", parse_mode="MarkdownV2" ) return
 
 node_id = args[0].strip()
-lines = [f"📊 *Metrics* untuk node `{escape_markdown_v2(node_id)}`:"]
+header = f"📊 Metrics for node `{escape_markdown_v2(node_id)}`:"
+lines = [header]
 
-for m in METRICS:
+for metric in METRICS:
     try:
-        data = fetch_metric(node_id, m)
-        val = data if not isinstance(data, dict) else data.get('value', data)
-        val_esc = escape_markdown_v2(val)
+        data = fetch_metric(node_id, metric)
+        # If API returns dict with 'value'
+        val = data.get('value') if isinstance(data, dict) and 'value' in data else data
+        val_escaped = escape_markdown_v2(val)
     except Exception as e:
-        val_esc = escape_markdown_v2(f"Error: {e}")
-    lines.append(f"• *{m.title()}*: `{val_esc}`")
+        val_escaped = escape_markdown_v2(f"Error: {e}")
+    lines.append(f"• *{metric.title()}*: `{val_escaped}`")
 
-text = "\n".join(lines)
-await update.message.reply_text(text, parse_mode="MarkdownV2")
+await update.message.reply_text(
+    "\n".join(lines),
+    parse_mode="MarkdownV2"
+)
 
 if name == "main": app = ApplicationBuilder().token(TELEGRAM_TOKEN).build() app.add_handler(CommandHandler("start", cmd_start)) app.add_handler(CommandHandler("metrics", cmd_metrics)) app.run_polling()
 
