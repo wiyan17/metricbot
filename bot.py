@@ -1,120 +1,137 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Telegram bot using Playwright to scrape Cortensor heatmap rank table.
+
+Commands:
+/start     - show help
+/rank      - fetch top 25 nodes
+/metric    - lookup a single node; optionally specify a metric:
+             /metric <node_address> <metric_name>
+
+Configuration via .env (TELEGRAM_TOKEN).
+"""
 import os
 import re
-import requests
-import logging
+import asyncio
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from playwright.async_api import async_playwright
 
-# ================= CONFIGURATION =================
-TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_TOKEN",
-    "8101652890:AAGkQGAopqTKlOOoU4fH7mTtDde3OgBuYtI"
-)
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+# Load environment variables
+load_dotenv()
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN not set in .env")
 
-# Base URL for reputation API
-API_BASE_URL = "https://lb-be-4.cortensor.network/reputation"
-# Metrics to request
-METRICS = [
-    "request",
-    "create",
-    "prepare",
-    "precommit",
-    "commit",
-    "correctness",
-    "ping",
-    "global-ping"
+# Constants
+TABLE_URL = "https://dashboard-devnet4.cortensor.network/stats/heatmap/rank/table"
+COLUMNS = [
+    "Miner", "Score", "Status", "Last Active",
+    "Precommit Success %", "Precommit Counter",
+    "Commit Success %", "Commit Counter", "Commit/Precommit %",
+    "Prepare Success %", "Prepare Counter"
 ]
-# Fields to display per metric: (json_key, label)
-FIELDS = [
-    ("successRate", "Success rate"),
-    ("point", "Point"),
-    ("counter", "Counter")
-]
+MAX_RANK = 25
+SEND_INTERVAL = 1.0  # seconds between messages
 
+# MarkdownV2 escape helper
+def escape_md(text: str) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    return re.sub(r'([_\*\[\]\(\)~`>\#+\-=\|\{\}\.\!])', r'\\\1', text)
 
-def escape_markdown_v2(text):
+async def scrape_table() -> list[list[str]]:
     """
-    Escape special characters for Telegram MarkdownV2.
+    Scrapes the entire rank table and returns rows of cell texts.
     """
-    if not isinstance(text, str):
-        text = str(text)
-    # characters to escape
-    escape_chars = r"_*[]()~`>#+-=|{}.!"
-    return re.sub(rf"([{re.escape(escape_chars)}])", r"\\\1", text)
-
-
-def fetch_metric(node_id, metric):
-    """
-    Fetch a single metric from the reputation API.
-    Returns JSON dict or raw text or None on error.
-    """
-    url = f"{API_BASE_URL}/{node_id}/{metric}"
-    logging.info(f"Requesting {url}")
-    try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logging.error(f"Error fetching {metric}: {e}")
-        return None
-
-    try:
-        return resp.json()
-    except ValueError:
-        logging.warning(f"Non-JSON for {metric}: {resp.text[:100]}")
-        return resp.text.strip() or None
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(TABLE_URL, timeout=60000)
+        await page.wait_for_selector("table tbody tr", timeout=60000)
+        row_elems = await page.query_selector_all("table tbody tr")
+        data = []
+        for row in row_elems:
+            cells = await row.query_selector_all("td")
+            texts = [(await cell.inner_text()).strip() for cell in cells]
+            if len(texts) >= len(COLUMNS):
+                data.append(texts[:len(COLUMNS)])
+        await browser.close()
+        return data
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info(f"Received /start from {update.effective_user.id}")
-    message = (
-        "👋 *Welcome!*\n"
-        "Use `/metrics <node_id>` to fetch node metrics.\n"
-        "Example: `/metrics 0xb618b27B55372AE8d304E4A10fa82E506c771c1A`"
+    """Show help text"""
+    text = (
+        "👋 *Cortensor Metrics Bot*\n"
+        "/rank - top 25 nodes\n"
+        "/metric <node_address> [metric_name] - single node lookup\n"
+        "   e.g. /metric 0x123... 'Precommit Success %'"
     )
-    await update.message.reply_text(message, parse_mode="MarkdownV2")
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
 
-async def cmd_metrics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info(f"Received /metrics args={context.args}")
+async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send top 25 node metrics one by one"""
+    chat_id = update.effective_chat.id
+    await context.bot.send_message(chat_id, "⏳ Fetching top 25 nodes...")
+    try:
+        table = await scrape_table()
+    except Exception as e:
+        return await context.bot.send_message(chat_id, f"❌ Scrape error: {e}")
+
+    for i, row in enumerate(table[:MAX_RANK], start=1):
+        lines = [f"📊 *Rank {i}*"]
+        for col_name, cell in zip(COLUMNS, row):
+            lines.append(f"*{escape_md(col_name)}*: `{escape_md(cell)}`")
+        await context.bot.send_message(chat_id, "\n".join(lines), parse_mode="MarkdownV2")
+        await asyncio.sleep(SEND_INTERVAL)
+
+async def cmd_metric(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lookup a single node; optional metric name"""
+    chat_id = update.effective_chat.id
     args = context.args
-    if len(args) != 1:
-        await update.message.reply_text(
-            "⚠️ Usage: `/metrics <node_id>`",
-            parse_mode="MarkdownV2"
-        )
-        return
+    if len(args) < 1:
+        return await context.bot.send_message(chat_id, "⚠️ Usage: /metric <node_address> [metric_name]")
 
-    node_id = args[0].strip()
-    # Shorten node for header
-    short = f"{node_id[:10]}...{node_id[-10:]}"
-    lines = [f"📊 *Node metrics:* `{escape_markdown_v2(short)}`", ""]
+    node = args[0].strip().lower()
+    metric_name = " ".join(args[1:]).strip() if len(args) > 1 else None
 
-    for metric in METRICS:
-        # Display metric name
-        display_name = metric.replace("-", " ").title()
-        lines.append(f"*{display_name}:*")
-        data = fetch_metric(node_id, metric)
-        if not isinstance(data, dict):
-            # No data or not dict
-            for _, label in FIELDS:
-                lines.append(f"{label}: N/A")
-        else:
-            for key, label in FIELDS:
-                val = data.get(key)
-                if val is None:
-                    val_str = "N/A"
-                else:
-                    val_str = f"{val}" if key != "successRate" else f"{val}%"
-                lines.append(f"{label}: {escape_markdown_v2(val_str)}")
-        lines.append("")  # blank line
+    try:
+        table = await scrape_table()
+    except Exception as e:
+        return await context.bot.send_message(chat_id, f"❌ Scrape error: {e}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2")
+    for row in table:
+        if row[0].strip().lower() == node:
+            if metric_name:
+                try:
+                    idx = next(i for i, col in enumerate(COLUMNS) if col.lower() == metric_name.lower())
+                except StopIteration:
+                    available = ", ".join(COLUMNS)
+                    return await context.bot.send_message(
+                        chat_id,
+                        f"❓ Unknown metric '{escape_md(metric_name)}'. Available: {escape_md(available)}"
+                    )
+                value = row[idx]
+                return await context.bot.send_message(
+                    chat_id,
+                    f"📊 *{escape_md(COLUMNS[idx])}* for node `{escape_md(node)}`: `{escape_md(value)}`",
+                    parse_mode="MarkdownV2"
+                )
+            else:
+                lines = [f"📊 *Node*: `{escape_md(node)}`"]
+                for col_name, cell in zip(COLUMNS, row):
+                    lines.append(f"*{escape_md(col_name)}*: `{escape_md(cell)}`")
+                return await context.bot.send_message(chat_id, "\n".join(lines), parse_mode="MarkdownV2")
+
+    await context.bot.send_message(chat_id, "❓ Node not found.")
 
 if __name__ == "__main__":
-    print("🚀 Bot is starting…")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("metrics", cmd_metrics))
+    app.add_handler(CommandHandler("rank", cmd_rank))
+    app.add_handler(CommandHandler("metric", cmd_metric))
+    print("Bot is starting…")
     app.run_polling()
