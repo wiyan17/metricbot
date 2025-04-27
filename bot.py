@@ -4,9 +4,9 @@
 Telegram bot using Playwright to scrape Cortensor heatmap rank table.
 
 Commands:
-/start     - show help
-/rank      - fetch top 25 nodes
-/metric    - lookup a single node; optionally specify a metric:
+/start     \- show help
+/rank      \- fetch top 25 nodes
+/metric    \- lookup a single node; optionally specify a metric:
              /metric <node_address> <metric_name>
 
 Configuration via .env (TELEGRAM_TOKEN).
@@ -56,7 +56,7 @@ async def scrape_table() -> list[list[str]]:
         data = []
         for row in row_elems:
             cells = await row.query_selector_all("td")
-            texts = [(await cell.inner_text()).strip() for cell in cells]
+            texts = [ (await cell.inner_text()).strip() for cell in cells ]
             if len(texts) >= len(COLUMNS):
                 data.append(texts[:len(COLUMNS)])
         await browser.close()
@@ -66,16 +66,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help text"""
     text = (
         "👋 *Cortensor Metrics Bot*\n"
-        "/rank - top 25 nodes\n"
-        "/metric <node_address> [metric_name] - single node lookup\n"
-        "   e.g. /metric 0x123... 'Precommit Success %'"
+        "/rank \- top 25 nodes\n"
+        "/metric <node_address> [metric_name] \- single node lookup\n"
+        "Example: /metric 0x123... 'Precommit Success %'"
     )
     await update.message.reply_text(text, parse_mode="MarkdownV2")
 
 async def cmd_rank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send top 25 node metrics one by one"""
     chat_id = update.effective_chat.id
-    await context.bot.send_message(chat_id, "⏳ Fetching top 25 nodes...")
+    await context.bot.send_message(chat_id, "⏳ Fetching top 25 nodes...", parse_mode=None)
     try:
         table = await scrape_table()
     except Exception as e:
@@ -112,7 +112,7 @@ async def cmd_metric(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     available = ", ".join(COLUMNS)
                     return await context.bot.send_message(
                         chat_id,
-                        f"❓ Unknown metric '{escape_md(metric_name)}'. Available: {escape_md(available)}"
+                        f"❓ Unknown metric '{escape_md(metric_name)}'. Available: {escape_md(available)}",
                     )
                 value = row[idx]
                 return await context.bot.send_message(
